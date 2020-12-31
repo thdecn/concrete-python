@@ -171,3 +171,182 @@ def lwe_subtraction(ct1, var1, enc1, ct2, var2, enc2, exact, q):
     return ct3, var3, enc3
 
 #===============================================================================
+
+#----Functions for Homomorphic Multiplication with a Constant-------------------
+
+def mul_constant_static_encoder(ct, var, enc, constant, p, q):
+    """Multiply an LWE ciphertext with a small integer message.
+        The encoding does not change, the body and mask do.
+    Args:
+        ct: Ciphertext.
+        var: Corresponding variance.
+        enc: Corresponding array of Encoder parameters (min, delta, precision_bits, padding_bits).
+        constant: Integer constant for multiplication.
+        p: plaintext modulus 2^precision_bits.
+        q: ciphertext modulus 2^torus_bits.
+    Returns:
+        Ciphertext ct_out.
+        Corresponding Variance var_out.
+        Corresponding Encoder enc_out.
+    """
+    # Multiplication
+    ct_out = (ct * constant) % q
+
+    # Compute and Apply correction to Body
+    max = enc[0] + (enc[1] * (p - 1.0) / p)
+    pt0 = encoder(0.0, enc[0], max, np.uint64(enc[3]), p, q)
+    correction = (pt0 * (constant - 1)) % q
+    ct_out[-1] = np.uint64( (np.int64(ct_out[-1]) - correction) % q )
+
+    # Compute the absolute value of the message
+    c_abs = np.uint64(np.abs(constant))
+    # Estimate the new variance
+    var_out = var * (c_abs * c_abs)
+    # Copy Encoder
+    enc_out = enc
+
+    #if (c_abs != 0) :
+        # Update the encoder precision based on the variance
+        # __TODO__ enc_out[2] = update_precision_from_variance(var_out, enc_out, q)
+
+    return ct_out, var_out, enc_out
+
+def mul_constant_with_padding(ct, var, enc, constant, max_constant, nb_bit_padding, p, q):
+    """Multiply an LWE ciphertext with a real constant.
+        Change the encoding and the ciphertexts by consuming some bits of padding.
+        The input encoding should contain zero in its interval.
+        The output precision is the minimum between the input and the number of bits of padding consumed
+    Args:
+        ct: Ciphertext.
+        var: Corresponding variance.
+        enc: Corresponding array of Encoder parameters (min, delta, precision_bits, padding_bits).
+        constant: Real constant for scaling ct.
+        max_constant: A positive scaling factor for encoder, has to be greater than abs(constant).
+        nb_bit_padding: Number of padding bits to be consumed.
+        p: plaintext modulus 2^precision_bits.
+        q: ciphertext modulus 2^torus_bits.
+    Returns:
+        Ciphertext ct_out.
+        Corresponding Variance var_out.
+        Corresponding Encoder enc_out.
+    Erros:
+        ConstantMaximumError: If the constant is bigger than max_constant.
+        ZeroInIntervalError: If zero is not in the interval described by the encoder.
+        NotEnoughPaddingError: If there is not enough padding.
+    """
+    # Check that the constant is below the maximum
+    if (constant > max_constant or constant < -max_constant):
+        print("ConstantMaximumError")
+    # Check that zero is in the interval
+    if (enc[0] > 0.0 or (enc[0]+enc[1]) < 0.0 ):
+        print("ZeroInIntervalError")
+    # Check bits of paddings
+    if (enc[3] < nb_bit_padding):
+        print("NotEnoughPaddingError")
+
+    # Absolute value of constant
+    c_abs = np.abs(constant)
+    # Discretize c_abs with regard to the number of bits of padding to use
+    scal = np.int64(np.round(c_abs / max_constant * pow(2.0, nb_bit_padding)))
+
+    # Encode 0 and subtract it from Body
+    max = (float(p-1)/float(p)*float(enc[1])) + enc[0]
+    tmp_sub = encoder(0.0, enc[0], max, np.uint64(enc[3]), p, q)
+    ct[-1] = (ct[-1] - tmp_sub) % q
+
+    # Scalar Multiplication
+    ct = (ct * scal) % q
+
+    # New Encoder
+    new_o = enc[0] * max_constant
+    new_max = (enc[0] + enc[1] - (enc[1] / pow(2.0, enc[2]))) * max_constant
+    new_delta = new_max - new_o
+    # Compute the discretization of c_abs
+    discret_c_abs = float(scal) * pow(2.0, -nb_bit_padding) * max_constant
+    # Compute the rounding error on c_abs
+    rounding_error = np.abs(discret_c_abs - c_abs)
+    # Get the ciphertext granularity
+    granularity = enc[1] / pow(2.0, enc[2])
+    # Compute the max of the ciphertext (based on the metadata of the encoder)
+    max = np.maximum(np.abs(enc[0] + enc[1] - (enc[1] / pow(2.0, enc[2]))), np.abs(enc[0]))
+    # Compute the new granularity
+    new_granularity = 2.0 * np.abs(granularity * rounding_error / 2.0 + granularity / 2.0 * discret_c_abs + rounding_error * max)
+    # Compute the new precision
+    new_precision = np.minimum(np.floor(np.log2(new_delta / new_granularity)), enc[2])
+
+    # Create the new encoder
+    enc_out = np.zeros(4)
+    enc_out[0] = new_o
+    enc_out[1] = new_delta
+    enc_out[2] = np.minimum(np.minimum(nb_bit_padding, enc[2]), new_precision)
+    enc_out[3] = enc[3] - nb_bit_padding
+
+    # Estimate the new variance
+    var_out = var * (float(scal) * float(scal))
+
+    #if (scal != 0):
+        # Update the encoder precision based on the variance
+        # __TODO__ enc_out[2] = update_precision_from_variance(var_out, enc_out, q)
+
+    # Encode 0 with the new encoder
+    max_out = (float(p-1)/float(p)*float(enc_out[1])) + enc_out[0]
+    tmp_add = encoder(0.0, enc_out[0], max_out, np.uint64(enc_out[3]), p, q)
+    ct[-1] = (ct[-1] + tmp_add) % q
+
+    if (constant < 0.0):
+        # Compute the opposite
+        ct = np.uint64( (-np.int64(ct)) % q )
+        # Add correction if there is some padding
+        correction = np.int64(0)
+        torus_bits = np.int64(np.log2(q))
+
+        if (enc_out[3] > 0):
+            correction = (1 << (torus_bits - np.int64(enc_out[3]))) - (1 << (torus_bits - np.int64(enc_out[3]) - np.int64(enc_out[2]))) % q
+        else:
+            correction = (correction - (1 << (torus_bits - np.int64(enc_out[3]) - np.int64(enc_out[2])))) % q
+
+        ct[-1] = (ct[-1] + correction) % q
+
+        # Change the encoder
+        enc_out[0] = -(enc_out[0] + enc_out[1] - (enc_out[1] / pow(2.0, enc_out[2])))
+
+    ct_out = ct
+    return ct_out, var_out, enc_out
+
+#===============================================================================
+
+#----Functions for ... ---------------------------------------------------------
+def opposite(ct, enc, q):
+    """Compute the opposite of a ciphertext.
+    Args:
+        ct: Ciphertext.
+        enc: array of Encoder parameters (min, delta, precision_bits, padding_bits).
+        q: ciphertext modulus 2^torus_bits.
+    Returns:
+        Opposite of ct.
+    """
+    # Compute the opposite
+    ct_out = np.uint64( (-np.int64(ct)) % q )
+
+    # Add correction if there is some padding
+    correction = np.int(0)
+    torus_bits = np.int(np.log2(q))
+    padding = np.int(enc[3])
+    precision = np.int(enc[2])
+    if (padding > 0):
+        correction = (1 << (torus_bits - padding)) - (1 << (torus_bits - padding - precision))
+    else:
+        correction = (correction - (1 << (torus_bits - padding - precision))) % q
+    ct_out[-1] = (ct_out[-1] + correction) % q
+
+    # Change the encoder
+    enc_out = np.zeros(4)
+    old_max = enc[0] + enc[1] - (enc[1] / pow(2.0, enc[2]))
+    enc_out[0] = -old_max
+    enc_out[1] = enc[1]
+    enc_out[2] = enc[2]
+    enc_out[3] = enc[3]
+
+    return ct_out, enc_out
+
+#===============================================================================
