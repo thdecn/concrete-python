@@ -50,6 +50,160 @@ def update_precision_from_variance(var, enc, q):
 
     return new_precision
 
+def add_constant_static_encoder(ct1, enc1, message, p, q):
+    """Add a small message to an LWE ciphertext.
+        The encoding does not change but the body of the ciphertext does.
+    Args:
+        ct1: Ciphertext.
+        enc1: Corresponding array of Encoder parameters (min, delta, precision_bits, padding_bits).
+        message: Message to be added to ct1.
+        p: plaintext modulus 2^precision_bits.
+        q: ciphertext modulus 2^torus_bits.
+    Returns:
+        Ciphertext ct1.
+        Corresponding Encoder enc1.
+    Erros:
+        MessageTooBigError: If the message is bigger than the ct interval.
+    """
+    # Error if one message is not in [-delta,delta]
+    if (np.abs(message) > enc1[1]):
+        print("MessageTooBigError")
+
+    max = (float(p-1)/float(p)*float(enc1[1])) + 0.0
+    ct1[-1] = (ct1[-1] + encoder(message, 0.0, max, np.uint64(enc1[3]), p, q)) % q
+
+    return ct1, enc1
+
+def add_constant_dynamic_encoder(ct1, enc1, message, q):
+    """Add a message to an LWE ciphertext and shifts the interval with a distance equal to the message.
+         Does not change the body or the masks of the ciphertext.
+    Args:
+        ct1: Ciphertext.
+        enc1: Corresponding array of Encoder parameters (min, delta, precision_bits, padding_bits).
+        message: Message to be added to ct1.
+        q: ciphertext modulus 2^torus_bits.
+    Returns:
+        Ciphertext ct1.
+        Corresponding Encoder enc.
+    """
+
+    enc = np.zeros(4)
+    enc[0] = enc1[0] + message
+    enc[1] = enc1[1]
+    enc[2] = enc1[2]
+    enc[3] = enc1[3]
+
+    return ct1, enc
+
+def add_with_new_min(ct1, var1, enc1, ct2, var2, enc2, new_min, p, q):
+    """Compute an homomorphic addition between two LWE ciphertexts.
+    Args:
+        ct1, ct2: Ciphertexts to be added.
+        var1, var2: Corresponding variances.
+        enc1, enc2: Corresponding encoder values [min, delta, nb_bit_precision, nb_bit_padding].
+        new_min: New minimum interval for the output encoder.
+        p: plaintext modulus 2^precision_bits.
+        q: ciphertext modulus 2^torus_bits.
+    Returns:
+        Ciphertext ct3.
+        Corresponding Variance var3.
+        Corresponding Encoder enc3.
+    Erros:
+        DimensionError - If the ciphertexts have incompatible dimensions.
+        DeltaError - If the ciphertexts have incompatible deltas.
+        PaddingError - If the ciphertexts have incompatible paddings.
+    """
+    # Check dimensions
+    if (len(ct1) != len(ct2)):
+        print("DimensionError")
+
+    # Add the two ciphertexts together
+    ct3 = (ct1 + ct2) % q
+
+    # Error if the deltas are not identical as well as the paddings
+    # Checks
+    tmp = np.abs(enc1[1] - enc2[1]) / np.maximum(enc1[1], enc2[1])
+    limit1 = enc1[1] / pow(2.0, -40)
+    limit2 = enc2[1] / pow(2.0, -40)
+    if ( not (tmp < limit1 and tmp < limit2) ):
+        print("DeltaError")
+    if (enc1[3] != enc2[3]):
+        print("PaddingError")
+
+    # Update the variances and the Encoder
+    # Compute the new variance
+    var3 = var1 + var2
+
+    # Encoder
+    enc3 = np.zeros(4)
+    enc3[0] = new_min
+    enc3[1] = enc1[1]
+    enc3[2] = enc1[2]
+    enc3[3] = enc1[3]
+
+    # Correction related to the addition
+    max = enc3[0] + (enc3[1] * (p - 1.0) / p)
+    ct3[-1] = (ct3[-1] + encoder(enc1[0] + enc2[0], enc3[0], max, np.uint64(enc3[3]), p, q) ) % q
+
+    # Update the encoder precision based on the variance
+    # __TODO__ enc3[2] = update_precision_from_variance(var3, enc3, q)
+
+    return ct3, var3, enc3
+
+def add_centered(ct1, var1, enc1, ct2, var2, enc2, p, q):
+    """Compute an homomorphic addition between two LWE ciphertexts.
+        The center of the output Encoder is the sum of the two centers of the input Encoders.
+    Args:
+        ct1, ct2: Ciphertexts to be added.
+        var1, var2: Corresponding variances.
+        enc1, enc2: Corresponding encoder values [min, delta, nb_bit_precision, nb_bit_padding].
+        p: plaintext modulus 2^precision_bits.
+        q: ciphertext modulus 2^torus_bits.
+    Returns:
+        Ciphertext ct3.
+        Corresponding Variance var3.
+        Corresponding Encoder enc3.
+    Erros:
+        DimensionError - If the ciphertexts have incompatible dimensions.
+        DeltaError - If the ciphertexts have incompatible deltas.
+    """
+    # Checks
+    if (len(ct1) != len(ct2)):
+        print("DimensionError")
+
+    # Error if the deltas are not identical
+    # Checks
+    tmp = np.abs(enc1[1] - enc2[1]) / np.maximum(enc1[1], enc2[1])
+    limit1 = enc1[1] / pow(2.0, -40)
+    limit2 = enc2[1] / pow(2.0, -40)
+    if ( not (tmp < limit1 and tmp < limit2) ):
+        print("DeltaError")
+
+    # Add the two ciphertexts together
+    ct3 = (ct1 + ct2) % q
+
+    # Correction for the addition
+    enc3 = np.zeros(4)
+    enc3[0] = 0.0
+    enc3[1] = enc1[1]
+    enc3[2] = enc1[2]
+    enc3[3] = enc1[3]
+    max = enc3[0] + (enc3[1] * (p - 1.0) / p)
+    correction = encoder(enc1[1]/2.0, enc3[0], max, np.uint64(enc3[3]), p, q)
+    ct3[-1] = np.uint64((np.int64(ct3[-1]) - np.int64(correction)) % q)
+
+    # Update the variances and the Encoder
+    # Compute the new variance
+    var3 = var1 + var2
+
+    # Encoder
+    enc3[0] = enc1[0] + enc2[0] + enc1[1] / 2.0
+
+    # Update the encoder precision based on the variance
+    # __TODO__ enc3[2] = update_precision_from_variance(var3, enc3, q)
+
+    return ct3, var3, enc3
+
 def lwe_addition(ct1, var1, enc1, ct2, var2, enc2, exact, q):
     """Compute an addition between two LWE ciphertexts by eating one bit of padding.
         Corresponds to "add_with_padding_{exact}" from the Rust implementation.
