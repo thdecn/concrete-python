@@ -1,4 +1,5 @@
 import numpy as np
+from lwe_encrypt import *
 
 #----Functions for Homomorphic Addition and Subtraction-------------------------
 def nb_bit_from_variance_99(var, torus_bits):
